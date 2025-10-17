@@ -16,7 +16,10 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def _startup():
         init_db()
-        start_workers(n=1)  # bump to 2..N if you want parallel processing
+        start_workers(n=3, crash_thread_index=0, crash_after_dequeues=2)  
+        start_reaper()
+
+
 
     @app.get("/healthz")
     def healthz():

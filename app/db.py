@@ -58,16 +58,36 @@ def init_db() ->None:
         if "last_error" not in cols:
             conn.execute("ALTER TABLE jobs ADD COLUMN last_error TEXT")
 
+                cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "lease_until" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN lease_until TEXT")
+        if "processing_by" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN processing_by TEXT")
+
+        now = _utcnow_iso()
+        conn.execute(
+            """
+            UPDATE jobs
+               SET status='pending', lease_until=NULL, processing_by=NULL, updated_at=?
+             WHERE status IN ('started','processing')
+               AND (lease_until IS NULL OR lease_until < ?)
+            """,
+            (now, now),
+        )
 def _utcnow_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat()
+
+def _plus_seconds_iso() -> str:
+    return (datetime.utcnow() + timedelta(seconds=sec)).replace(microsecond=0).isoformat()
+
 
 def insert_job(text:str) -> UUID:
     job_uuid = uuid4()
     now = _utcnow_iso()
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO jobs (id, status, text, result_chars, created_at, updated_at) "
-            "VALUES (?, 'pending', ?, NULL, ?, ?)", 
+            "INSERT INTO jobs (id, status, text, result_chars, attempts, last_error, created_at, updated_at) "
+            "VALUES (?, 'pending', ?, NULL, 0, NULL, ?, ?)", 
             (job_uuid.hex, text, now, now), 
         )
     return job_uuid
@@ -134,4 +154,60 @@ def record_failed(job_id: UUID, error_text:str) -> None:
             WHERE id=?
             """,
             (error_text[:2000], now, job_id.hex),
+        )
+
+def set_lease_started(job_id: UUID, processing_by: str, lease_seconds: int)->None:
+    now = _utcnow_iso()
+    until = _plus_seconds_iso(lease_seconds)
+    while get.conn() as conn:
+        conn.execute(
+            """
+            UPDATE jobs
+                SET status='started',
+                    processing_by=?,
+                    lease_until =?,
+                    updated_at=?
+            WHERE id=?
+            """,
+            (processing_by, unitl, now, job_id.hex),
+        )
+def extend_lease(job_id: UUID, lease_seconds: int) -> None:
+    now = _utcnow_iso()
+    until = _plus_seconds_iso(lease_seconds)
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE jobs SELECT lease_until=?, updated_at=?, WHERE id=?
+            """,
+            (until, now, job_id.hex),
+        )
+def clear_lease(job_id: UUID) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE jobs SET lease_until=NULL, processing_by=NULL, updated_at=? WHERE id=?
+            """,
+            (_utcnow_iso(), job_id.hex),
+        )
+
+def reap_expired_ids(now_iso: str) -> List[str]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id FROM jobs WHERE lease_until IS NOT NULL AND lease_until < ?",
+            (now_iso),
+        ).fetchall()
+    return [r["id"] for r in rows]
+
+def reset_to_pending(job_id_hex: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE jobs
+               SET status='pending',
+                   lease_until=NULL,
+                   processing_by=NULL,
+                   updated_at=?
+             WHERE id=?
+            """,
+            (_utcnow_iso(), job_id_hex),
         )

@@ -37,6 +37,9 @@ def get_status(job_id: UUID):
         status=row["status"]
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
+        processing_by=row["processing_by"],
+        lease_until = (datetime.fromisoformat(row["lease_until"]))
+                        if row["lease_until"] else None,
     )
 
 @router.get("/jobs/{job_id}/result", response_model=JobResultResponse)

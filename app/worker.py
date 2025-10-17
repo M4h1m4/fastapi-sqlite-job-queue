@@ -5,22 +5,36 @@ import time
 import random
 from queue import Queue 
 from uuid import UUID
-from .db import fetch_job_text, update_status, get_attempts, record_retry, record_failed
+from .db import fetch_job_text, update_status, get_attempts, record_retry, record_failed, set_lease_started, extend_lease, clear_lease, reap_expired_ids, reset_to_pending
 
 log = logging.getLogger("text-jobs")
 
 job_queue: "Queue[UUID]" = Queue()
-MAX_RETRIES = 2
 
-def worker_loop()-> None:
-    log.info("worker started")
+MAX_RETRIES = 2
+LEASE_SEC = 5
+REAPER_SEC = 5
+
+class SimulatedCrash(Exception):
+    pass
+
+def worker_loop(thread_index: int, crash_after_dequeues: Optional[int]=None)-> None:
+    label = f"w-{thread_index+1}"
+    log.info("worker %d started", thread_index+1)
+    dequeues = 0
+
     while True:
         job_id = job_queue.get()
+        dequeues+=1
+        set_lease_started(job_id, processing_by=label, lease_seconds=LEASE_SEC)
+        
+        if crash_after_dequeues is not None and thread_index == 0 and dequeues >= crash_after_dequeues:
+            log.error("Simulated crash in %s after %d dequeues (job %s)", label, dequeues, job_id)
+            raise SimulatedCrash("boom")
+
         try:
             if random.randint(1,1000) < 100: #(~10%)
                 raise Exception("Injected failure: after_get")
-
-            update_status(job_id, "started")
             if random.randint(1, 1000) <= 200: #(~20%)
                 raise Exception("Injected failure: after_started")
 
@@ -38,6 +52,11 @@ def worker_loop()-> None:
                 raise Exception("Injected failure: before_done")
 
             update_status(job_id, "done", result_chars=chars)
+            clear_lease(job_id)
+        
+        except SimulatedCrash:
+            raise
+
         except Exception as e:
             try:
                 attempts = get_attempts(job_id)
@@ -55,7 +74,25 @@ def worker_loop()-> None:
         finally:
             job_queue.task_done()
 
-def start_workers(n: int=1) -> None:
+
+
+def reaper_loop() -> None:
+    log.info("reaper started (interval=%ss)", REAPER_SEC)
+    while True:
+        now_iso = datetime.utcnow().replace(microsecond=0).isoformat()
+        expired = reap_expired_ids(now_iso)
+        for idhex in expired:
+            reset_to_pending(idhex)                 # clear lease + set pending
+            job_queue.put(UUID(idhex))              # put back for workers
+            log.warning("reaper: returned expired job %s to queue", idhex)
+        time.sleep(REAPER_SEC)
+
+def start_workers(n: int, crash_thread_index: int = 0, crash_after_dequeues: Optional[int] = None) -> None:
     for i in range(n):
-        t = threading.Thread(target=worker_loop, name=f"joba_worker-{i+1}", daemon=True)
+        target = lambda i=1: worker_loop(i, crash_after_dequeues if i==crash_thread_index else None)
+        t = threading.Thread(target=target, name=f"joba_worker-{i+1}", daemon=True)
         t.start()
+
+def start_reaper() -> None:
+    t = threading.Thread(target=reaper_loop, name="reaper", daemon=True)
+    t.start()

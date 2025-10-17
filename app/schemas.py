@@ -12,6 +12,9 @@ class JobStatusResponse(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    processing_by: Optional[str] = None
+    lease_until: Optional[datetime] = None
+    
 class JobResultResponse(BaseModel):
     job_id : UUID
     status: str 
