@@ -1,4 +1,4 @@
-FastAPI + SQLite Job Queue
+# FastAPI + SQLite Job Queue
 
 Upload a text file → get a job_id → poll status/result.
 Two builds:
@@ -7,7 +7,7 @@ Sync version → on main branch
 
 Async version → on asyncv2 branch
 
-🧭 Overview
+# 🧭 Overview
 
 A tiny service that accepts a text file, enqueues a job, and returns the number of characters when done. It demonstrates:
 
