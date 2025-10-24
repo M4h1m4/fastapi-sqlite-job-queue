@@ -21,13 +21,13 @@ Retries, failure injection (for testing), and in the async build: leases + reape
 
 Both versions expose the same API.
 
-🌿 Branches
+# 🌿 Branches
 
 main (sync) — FastAPI + sqlite3 + threading.Queue + worker thread
 
 asyncv2 (async) — FastAPI (async) + aiosqlite + asyncio.Queue + worker tasks, with connection pool, lease/claim, reaper, supervisor
 
-✨ Features (common)
+# ✨ Features (common)
 
 POST /jobs — upload a UTF-8 text file, returns { job_id, status:"pending" }
 
@@ -45,41 +45,41 @@ GET /jobs/{id}/result —
 
 Statuses: pending → started → processing → done (or failed)
 
-🗃️ Data model (jobs table)
-Column	Type	Notes
-id	CHAR(32)	UUID (hex, no hyphens) primary key
-status	TEXT	pending/started/processing/done/failed
-text	TEXT	Uploaded file content
-result_chars	INTEGER	Character count (set on success)
-attempts	INTEGER	Number of failures so far
-last_error	TEXT	Last failure message
-processing_by	TEXT	Worker label (w-1, w-2, …)
-lease_until	TEXT	ISO timestamp; reaper requeues expired leases
-created_at	TEXT	ISO timestamp (UTC)
-updated_at	TEXT	ISO timestamp (UTC)
+# 🗃️ Data model (jobs table)
+Column	Type	Notes <br>
+id	CHAR(32)	UUID (hex, no hyphens) primary key <br>
+status	TEXT	pending/started/processing/done/failed <br>
+text	TEXT	Uploaded file content <br>
+result_chars	INTEGER	Character count (set on success) <br>
+attempts	INTEGER	Number of failures so far <br>
+last_error	TEXT	Last failure message <br>
+processing_by	TEXT	Worker label (w-1, w-2, …) <br>
+lease_until	TEXT	ISO timestamp; reaper requeues expired leases <br>
+created_at	TEXT	ISO timestamp (UTC) <br>
+updated_at	TEXT	ISO timestamp (UTC) <br>
 
 Indexes: status, updated_at, and (status, lease_until).
 
 
-🔌 API quickstart (works for both versions)
-# 1) Start server (see per-branch commands below)
-# 2) Health
+# 🔌 API quickstart (works for both versions)
+ 1) Start server (see per-branch commands below)
+ 2) Health
 curl http://127.0.0.1:8000/healthz
 
-# 3) Create a job
+ 3) Create a job
 echo "hello async world" > notes.txt
 curl -F "file=@notes.txt" http://127.0.0.1:8000/jobs
-# => {"job_id":"<UUID>", "status":"pending"}
+ => {"job_id":"<UUID>", "status":"pending"}
 
-# 4) Check status
+ 4) Check status
 curl "http://127.0.0.1:8000/jobs/<UUID>/status"
 
-# 5) Get result
+ 5) Get result
 curl -i "http://127.0.0.1:8000/jobs/<UUID>/result"
-# 202 while pending/processing; 200 with {characters} when done; 409 if failed
+ 202 while pending/processing; 200 with {characters} when done; 409 if failed
 
 
-🧱 Sync version (branch: main)
+# 🧱 Sync version (branch: main)
 
 Stack
 
@@ -99,24 +99,21 @@ A background worker thread does the work (len(text)), updating status through ph
 
 Retries: on error, increments attempts and re-enqueues up to a cap; then marks failed.
 
-Run 
+# Run 
 
-# get the sync code
-git checkout main
+get the sync code: git checkout main
 
-# install deps
-pip install -r requirements.txt
-# (sync requirements: fastapi, uvicorn, pydantic, python-multipart)
+install deps : pip install -r requirements.txt
+(sync requirements: fastapi, uvicorn, pydantic, python-multipart)
 
-# start
-uvicorn main:app --reload  # or uvicorn app.app:app --reload if packaged
+start: uvicorn main:app --reload  # or uvicorn app.app:app --reload if packaged
 
 Test
 echo "hello" > notes.txt
 curl -F "file=@notes.txt" http://127.0.0.1:8000/jobs
 The sync build is great for understanding fundamentals (CRUD, queue, worker, retries). It uses one process and blocks threads when sleeping/doing I/O.
 
-Async version (branch: asyncv2)
+# Async version (branch: asyncv2)
 
 Stack
 
@@ -145,9 +142,9 @@ Leases + reaper + supervisor provide self-healing behavior.
 Run
 git checkout asyncv2
 pip install -r requirements.txt
-# (async adds: aiosqlite, httpx for tests; plus fastapi, uvicorn, python-multipart)
+(async adds: aiosqlite, httpx for tests; plus fastapi, uvicorn, python-multipart)
 
-# From repo root (package layout: app/)
+From repo root (package layout: app/)
 PYTHONPATH=. uvicorn app.app:app --reload --host 127.0.0.1 --port 8000
 
 
