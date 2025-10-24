@@ -1,80 +1,192 @@
-In SQLite, WAL (Write-Ahead Logging) mode lets you have:
+FastAPI + SQLite Job Queue
 
-Many concurrent readers, and
+Upload a text file → get a job_id → poll status/result.
+Two builds:
 
-At most one writer at a time (writers are still serialized).
+Sync version → on main branch
 
-How it works (quickly):
+Async version → on asyncv2 branch
 
-Writers append changes to a separate dbname-wal file.
+🧭 Overview
 
-Readers keep reading a consistent snapshot from the main DB file while the writer appends—so reads don’t block writes, and writes don’t block reads (most of the time).
+A tiny service that accepts a text file, enqueues a job, and returns the number of characters when done. It demonstrates:
 
-Only one writer can hold the write lock at commit time, so two simultaneous writes still contend. That’s why keeping write transactions short (and using a small busy_timeout) helps.
+Clean FastAPI endpoints
 
+Durable job state in SQLite
 
+Background processing with a queue + workers
 
-[App start]
-  → create_app()
-  → include_router(api)
-  → on_startup:
-      → init_db()  ⟶ (WAL, table/indexes, add attempts/last_error if missing)
-      → start_workers(n=1) ⟶ spawn worker thread(s)
+Retries, failure injection (for testing), and in the async build: leases + reaper + supervisor
 
-[Client → POST /jobs (file)]
-  → read bytes → if >1MB → 413
-  → decode UTF-8 → if fail → 400
-  → insert_job(text)
-      → uuid4() → job_id
-      → DB INSERT { id=job_id, status="pending", attempts=0, last_error=NULL, ... }
-  → enqueue job_id
-  → 201 { job_id, status:"pending" }
+Both versions expose the same API.
 
-[Worker thread: worker_loop()]
-  → job_id = queue.get()  (FIFO remove)
-  → try:
-      → update_status(job_id,"started")
-      → sleep 0.5
-      → update_status(job_id,"processing")
-      → text = fetch_job_text(job_id)
-      → sleep 2.0 (simulate work)
-      → chars = len(text)
-      → update_status(job_id,"done", result_chars=chars)
-    except Exception as e:
-      → attempts = get_attempts(job_id)   # failures so far
-      → if attempts < MAX_RETRIES:
-            record_retry(job_id, str(e))  # attempts += 1, last_error set, status="pending"
-            enqueue same job_id again
-        else:
-            record_failed(job_id, str(e)) # status="failed" (attempts unchanged here)
-    finally:
-      → queue.task_done()
+🌿 Branches
 
-[Client → GET /jobs/{job_id}/status]
-  → DB SELECT (*)
-    ↳ 404 if not found
-    ↳ 200 { job_id, status, created_at, updated_at }
+main (sync) — FastAPI + sqlite3 + threading.Queue + worker thread
 
-[Client → GET /jobs/{job_id}/result]
-  → DB SELECT (*)
-    ↳ 404 if not found
-    ↳ if status == "failed" → 409 { job_id, status:"failed", attempts, error:last_error }
-    ↳ else if status != "done" OR result_chars is NULL → 202 { job_id, status, "Result not ready" }
-    ↳ else → 200 { job_id, status, characters: result_chars }
+asyncv2 (async) — FastAPI (async) + aiosqlite + asyncio.Queue + worker tasks, with connection pool, lease/claim, reaper, supervisor
+
+✨ Features (common)
+
+POST /jobs — upload a UTF-8 text file, returns { job_id, status:"pending" }
+
+GET /jobs/{id}/status — returns { job_id, status, created_at, updated_at, ... }
+
+GET /jobs/{id}/result —
+
+200 when done → { job_id, status:"done", characters }
+
+202 while in progress → { job_id, status, "Result not ready" }
+
+409 when permanently failed → { job_id, status:"failed", attempts, error }
+
+404 if unknown
+
+Statuses: pending → started → processing → done (or failed)
+
+🗃️ Data model (jobs table)
+Column	Type	Notes
+id	CHAR(32)	UUID (hex, no hyphens) primary key
+status	TEXT	pending/started/processing/done/failed
+text	TEXT	Uploaded file content
+result_chars	INTEGER	Character count (set on success)
+attempts	INTEGER	Number of failures so far
+last_error	TEXT	Last failure message
+processing_by	TEXT	Worker label (w-1, w-2, …)
+lease_until	TEXT	ISO timestamp; reaper requeues expired leases
+created_at	TEXT	ISO timestamp (UTC)
+updated_at	TEXT	ISO timestamp (UTC)
+
+Indexes: status, updated_at, and (status, lease_until).
 
 
-<!-- rewrite this with basic sql queries # done
-introduce failure in worker loop using random
-worker loop should be restarted
-job_queue.task_done()--> look into this -->
+🔌 API quickstart (works for both versions)
+# 1) Start server (see per-branch commands below)
+# 2) Health
+curl http://127.0.0.1:8000/healthz
 
-install and use uv for running code
-testing script and stores all the logs into a file 
+# 3) Create a job
+echo "hello async world" > notes.txt
+curl -F "file=@notes.txt" http://127.0.0.1:8000/jobs
+# => {"job_id":"<UUID>", "status":"pending"}
+
+# 4) Check status
+curl "http://127.0.0.1:8000/jobs/<UUID>/status"
+
+# 5) Get result
+curl -i "http://127.0.0.1:8000/jobs/<UUID>/result"
+# 202 while pending/processing; 200 with {characters} when done; 409 if failed
 
 
-more scenarios
-Graceful failure: Worker loop can gracefully exit - when a exception is raised then exit the workerloop. implement logic to start new workerloop
-worker abruptly stopped 
-implement the maximum number of retries in a scenario where the worker loops are exited. 
+🧱 Sync version (branch: main)
 
+Stack
+
+FastAPI (sync routes)
+
+Python stdlib sqlite3
+
+threading.Thread workers + queue.Queue (FIFO)
+
+Simple retries (immediate, capped)
+
+How it works
+
+POST /jobs inserts a row (pending) and puts job_id on a **threading.Queue`.
+
+A background worker thread does the work (len(text)), updating status through phases.
+
+Retries: on error, increments attempts and re-enqueues up to a cap; then marks failed.
+
+Run 
+
+# get the sync code
+git checkout main
+
+# install deps
+pip install -r requirements.txt
+# (sync requirements: fastapi, uvicorn, pydantic, python-multipart)
+
+# start
+uvicorn main:app --reload  # or uvicorn app.app:app --reload if packaged
+
+Test
+echo "hello" > notes.txt
+curl -F "file=@notes.txt" http://127.0.0.1:8000/jobs
+The sync build is great for understanding fundamentals (CRUD, queue, worker, retries). It uses one process and blocks threads when sleeping/doing I/O.
+
+Async version (branch: asyncv2)
+
+Stack
+
+FastAPI (async endpoints)
+
+aiosqlite with a tiny connection pool
+
+asyncio.Queue + async worker tasks
+
+Leases (lease_until) to claim work, reaper to requeue expired jobs
+
+Supervisor restarts crashed workers
+
+Immediate retries with cap
+
+Fault injection (optional) to test robustness
+
+Why async?
+
+No thread blocking: awaited DB I/O and sleeps yield to the loop.
+
+Connection pool reuses a few open SQLite connections efficiently.
+
+Leases + reaper + supervisor provide self-healing behavior.
+
+Run
+git checkout asyncv2
+pip install -r requirements.txt
+# (async adds: aiosqlite, httpx for tests; plus fastapi, uvicorn, python-multipart)
+
+# From repo root (package layout: app/)
+PYTHONPATH=. uvicorn app.app:app --reload --host 127.0.0.1 --port 8000
+
+
+Test(curl)
+
+echo "hello async world" > notes.txt
+curl -F "file=@notes.txt" http://127.0.0.1:8000/jobs
+
+
+Test Script (async)
+python3 scripts/test.py --api http://127.0.0.1:8000 --file notes.txt --count 3 --log client.log
+
+
+Async Architecture 
+Client → POST /jobs
+  → insert row (pending) → put job_id on asyncio.Queue → 201 response
+
+Workers (N tasks)
+  loop:
+    job_id = await queue.get()
+    set_lease_started(job_id, processing_by='w-i', lease=now+LEASE_SEC)
+    update_status('processing')
+    text = fetch_job_text(job_id)
+    await asyncio.sleep(2.0)
+    update_status('done', result_chars=len(text))
+    clear_lease(job_id)
+    queue.task_done()
+
+Reaper (every REAPER_SEC)
+  finds rows with lease_until < now (started/processing) → reset to pending → re-enqueue
+
+Supervisor
+  restarts any crashed worker task
+
+Failure handling
+
+Handled exceptions: attempts += 1, status → pending, clear lease, re-enqueue (until cap).
+
+Crash: worker task dies → supervisor restarts it. Reaper re-enqueues any job whose lease expired (so work isn’t lost).
+
+Idempotent work (len(text)) means late “done” updates are safe.
 
